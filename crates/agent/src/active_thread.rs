@@ -20,6 +20,7 @@ use collections::{HashMap, HashSet};
 use editor::actions::{MoveUp, Paste};
 use editor::scroll::Autoscroll;
 use editor::{Editor, EditorElement, EditorEvent, EditorStyle, MultiBuffer};
+use futures::AsyncReadExt;
 use gpui::{
     AbsoluteLength, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardEntry,
     ClipboardItem, DefiniteLength, EdgesRefinement, Empty, Entity, EventEmitter, Focusable, Hsla,
@@ -41,6 +42,7 @@ use rope::Point;
 use settings::{Settings as _, SettingsStore, update_settings_file};
 use std::ffi::OsStr;
 use std::path::Path;
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -981,6 +983,7 @@ impl ActiveThread {
             }
             ThreadEvent::Stopped(reason) => match reason {
                 Ok(StopReason::EndTurn | StopReason::MaxTokens) => {
+                    self.play_last_agent_message(cx);
                     let thread = self.thread.read(cx);
                     self.show_notification(
                         if thread.used_tools_since_last_user_message() {
@@ -1160,6 +1163,93 @@ impl ActiveThread {
             }
             NotifyWhenAgentWaiting::Never => {
                 // Don't show anything
+            }
+        }
+    }
+
+    fn generate_speech_from_text(
+        &self,
+        cx: &mut Context<Self>,
+        text: String,
+    ) -> anyhow::Result<()> {
+        use anyhow::{Context, anyhow};
+        use http_client::{AsyncBody, Method, Request};
+        use serde_json::json;
+        use std::fs;
+        use std::io::Write;
+
+        let tts_url = "http://localhost:3000/v1/audio/speech";
+
+        let request_body = json!({
+            "model": "hexgrad/Kokoro-82M",
+            "input": text,
+            "voice": "af_sky"
+        });
+
+        // Get HTTP client from client crate
+        let client = cx.http_client();
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(tts_url)
+            .header("Content-Type", "application/json")
+            .body(AsyncBody::from(request_body.to_string()))
+            .context("Failed to build request")?;
+
+        // Create a unique filename for the wav file
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+        let filename = format!("zed_tts_{}.wav", timestamp);
+
+        // Get the home directory for saving the file
+        let home_dir = dirs::home_dir().ok_or_else(|| anyhow!("Could not find home directory"))?;
+        let audio_path = home_dir.join("zed_audio").join(&filename);
+
+        // Create directory if it doesn't exist
+        if !audio_path.parent().unwrap().exists() {
+            fs::create_dir_all(audio_path.parent().unwrap())
+                .context("Failed to create audio directory")?;
+        }
+
+        // Execute the request and save the response
+        let body = futures::executor::block_on(async {
+            let mut response = client.send(request).await.unwrap();
+
+            let mut body = Vec::new();
+            response.body_mut().read_to_end(&mut body).await.unwrap();
+            body
+        });
+
+        // Write the audio data to file
+        let mut file = std::fs::File::create(&audio_path).context("Failed to create audio file")?;
+        file.write_all(&body)
+            .context("Failed to write audio data to file")?;
+        Command::new("afplay").arg(&audio_path).spawn()?;
+
+        log::info!("Speech saved to file: {}", audio_path.display());
+        Ok(())
+    }
+
+    fn play_last_agent_message(&self, cx: &mut Context<Self>) {
+        let thread: &Thread = self.thread.read(cx);
+        // Find the last assistant message
+        if let Some(last_assistant_message) = thread.messages().last() {
+            let message_content = last_assistant_message.to_string();
+            if !message_content.is_empty() {
+                // Filter out thinking sections and other non-user-facing content
+                let filtered_content = message_content
+                    .lines()
+                    .filter(|line| !line.starts_with("<think>") && !line.contains("</think>"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                if !filtered_content.trim().is_empty() {
+                    log::info!("Filtered message to play: {}", filtered_content);
+
+                    // Use OpenAI TTS API to generate speech
+                    if let Err(err) = self.generate_speech_from_text(cx, filtered_content) {
+                        log::error!("Failed to generate speech: {}", err);
+                    }
+                }
             }
         }
     }

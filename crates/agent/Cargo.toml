@@ -27,7 +27,7 @@ assistant_slash_commands.workspace = true
 assistant_tool.workspace = true
 async-watch.workspace = true
 buffer_diff.workspace = true
-chrono.workspace = true
+chrono = { workspace = true, features = ["serde"] }
 client.workspace = true
 collections.workspace = true
 component.workspace = true
@@ -41,6 +41,7 @@ file_icons.workspace = true
 fs.workspace = true
 futures.workspace = true
 fuzzy.workspace = true
+dirs.workspace = true
 git.workspace = true
 gpui.workspace = true
 heed.workspace = true

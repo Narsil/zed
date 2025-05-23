@@ -67,6 +67,7 @@ dependencies = [
  "context_server",
  "convert_case 0.8.0",
  "db",
+ "dirs 4.0.0",
  "editor",
  "extension",
  "feature_flags",
